@@ -3,10 +3,11 @@ import yfinance as yf
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import numpy as np
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="台股投資全攻略", page_icon="📈", layout="wide")
-st.title("📈 台股資產管理系統 (含買入點標註)")
+st.title("📈 台股資產管理系統 (穩健修正版)")
 
 # --- 2. 快取功能 ---
 @st.cache_data(ttl=3600)
@@ -60,13 +61,13 @@ if st.button("🚀 執行完整分析"):
                 hist = ticker.history(period="5d")
                 if hist.empty: continue
                 cur_p = hist['Close'].iloc[-1]
-                buy_dt = pd.to_datetime(row['買進日期']).tz_localize('UTC')
+                buy_dt_obj = pd.to_datetime(row['買進日期']).tz_localize('UTC')
                 actions = ticker.actions
                 c_div, f_sh = 0, row['持有股數']
                 my_act = pd.DataFrame()
                 if not actions.empty:
                     actions.index = actions.index.tz_convert('UTC') if actions.index.tz else actions.index.tz_localize('UTC')
-                    my_act = actions.loc[buy_dt:]
+                    my_act = actions.loc[buy_dt_obj:]
                     c_div = (my_act['Dividends'] * row['持有股數']).sum()
                     for split in my_act['Stock Splits']:
                         if split > 0: f_sh *= split
@@ -113,14 +114,14 @@ if st.session_state.calc_results:
 
     st.dataframe(res_df.drop(columns=['顏色', '買進日期', '買進單價']), use_container_width=True)
 
-    # --- 7. 個別標的分析 (加強版走勢圖) ---
+    # --- 7. 個別標的分析 (修正五年報錯問題) ---
     st.write("---")
     st.subheader("📈 個別標的動態分析 (含買入點標記)")
     target_name = st.selectbox("選擇股票：", res_df['名稱'].tolist())
     target_info = res_df[res_df['名稱'] == target_name].iloc[0]
     t_sid = target_info['代碼']
     buy_p = target_info['買進單價']
-    buy_d = target_info['買進日期'] # 格式為 datetime.date
+    buy_d = target_info['買進日期'] 
 
     p_map = {"一日": "1d", "一週": "5d", "一月": "1mo", "一年": "1y", "五年": "5y"}
     sel_p = st.radio("時間範圍：", list(p_map.keys()), horizontal=True, index=2)
@@ -129,21 +130,21 @@ if st.session_state.calc_results:
     h_data = t_obj.history(period=p_map[sel_p])
     
     if not h_data.empty:
-        # 繪製基本走勢線
         fig = px.line(h_data, x=h_data.index, y='Close', title=f"{target_name} 走勢分析")
         
-        # 標註：買入價格 (水平橘色虛線)
+        # 標註成本線
         fig.add_hline(y=buy_p, line_dash="dash", line_color="orange", 
-                      annotation_text=f"買入價: {buy_p}", annotation_position="top left")
+                      annotation_text=f"成本:{buy_p}")
         
-        # 標註：買入日期 (垂直紅色實線)
-        # 檢查買入日期是否在當前顯示的圖表時間範圍內
+        # 修正後的買入日標註：檢查日期是否存在於範圍內
         h_min = h_data.index.min().date()
         h_max = h_data.index.max().date()
         
         if h_min <= buy_d <= h_max:
-            fig.add_vline(x=pd.to_datetime(buy_d), line_width=2, line_color="red", 
-                          annotation_text="買入日", annotation_position="top right")
+            # 使用字串格式來避開 Plotly 的 Timestamp 平均值計算錯誤
+            buy_d_str = buy_d.strftime("%Y-%m-%d")
+            fig.add_vline(x=buy_d_str, line_width=2, line_color="red", 
+                          annotation_text="買入日")
             
         st.plotly_chart(fig, use_container_width=True)
     else:

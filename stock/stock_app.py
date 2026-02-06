@@ -128,5 +128,30 @@ if st.button("🚀 執行完整分析"):
 
         st.write("### 📋 詳細報表")
         st.dataframe(res_df.drop(columns=['顏色']), use_container_width=True)
-    else:
-        st.error("無法分析，請檢查輸入內容。")
+
+        # --- 新增：股息與配股歷史明細 ---
+        st.write("---")
+        with st.expander("🔍 點擊展開：各標的除權息歷史紀錄 (核對用)"):
+            for _, row in edited_df.iterrows():
+                sid = str(row['代碼'])
+                full_id, s_name = get_stock_base_info(sid)
+                if full_id:
+                    ticker = yf.Ticker(full_id)
+                    buy_dt = pd.to_datetime(row['買進日期']).tz_localize('UTC')
+                    actions = ticker.actions
+                    
+                    if not actions.empty:
+                        actions.index = actions.index.tz_convert('UTC') if actions.index.tz else actions.index.tz_localize('UTC')
+                        my_actions = actions.loc[buy_dt:]
+                        
+                        if not my_actions.empty:
+                            st.write(f"**📍 {s_name} ({sid})**")
+                            # 格式化顯示
+                            display_actions = my_actions.copy()
+                            display_actions.index = display_actions.index.date
+                            display_actions.columns = ["現金股利 (元/股)", "股票股利 (拆分比)"]
+                            st.table(display_actions)
+                        else:
+                            st.write(f"**📍 {s_name} ({sid})**: 買進日期後尚無除權息紀錄。")
+                    else:
+                        st.write(f"**📍 {sid}**: 無除權息歷史數據。")

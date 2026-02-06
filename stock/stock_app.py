@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="台股投資全攻略", page_icon="📈", layout="wide")
-st.title("📈 台股資產管理系統 (智慧填名版)")
+st.title("📈 台股資產管理系統 (自動填名修復版)")
 
 # --- 2. 核心功能：名稱對照、補零 ---
 @st.cache_data(ttl=3600)
@@ -16,7 +16,7 @@ def get_stock_base_info(symbol):
     if symbol.isdigit() and len(symbol) < 4:
         symbol = symbol.zfill(4)
     
-    # 手動維護常見中文名稱 (解決 yfinance 只有英文的問題)
+    # 常見中文名稱對照表
     common_names = {
         "2330": "台積電", "0050": "元大台灣50", "0052": "富邦科技",
         "0056": "元大高股息", "2317": "鴻海", "2454": "聯發科",
@@ -42,9 +42,13 @@ def get_stock_base_info(symbol):
 
 # --- 3. 初始化 Session State ---
 if 'df' not in st.session_state:
+    # 預設資料
     st.session_state.df = pd.DataFrame([
         {"代碼": "2330", "股票名稱": "台積電", "買進日期": datetime(2023, 1, 1).date(), "買進單價": 500.0, "持有股數": 1000},
     ])
+    # 強制設定欄位型態，避免型別錯誤導致判定失效
+    st.session_state.df['代碼'] = st.session_state.df['代碼'].astype(str)
+    st.session_state.df['股票名稱'] = st.session_state.df['股票名稱'].astype(str)
 
 # --- 4. 側邊欄：檔案管理 ---
 st.sidebar.header("📁 檔案管理")
@@ -55,7 +59,7 @@ if uploaded_file:
         raw_df = pd.read_csv(uploaded_file)
         raw_df.columns = [c.strip() for c in raw_df.columns]
         
-        # 容錯處理：如果 CSV 沒有名稱欄位，補上
+        # 容錯處理
         if "股票名稱" not in raw_df.columns:
             raw_df["股票名稱"] = ""
 
@@ -63,9 +67,9 @@ if uploaded_file:
         for _, row in raw_df.iterrows():
             sid = str(row['代碼']).strip()
             _, name, fixed_sid = get_stock_base_info(sid)
-            # 如果 CSV 裡原本就有名字，優先用 CSV 的，除非是空白
             orig_name = str(row.get('股票名稱', '')).strip()
-            final_name = orig_name if orig_name and orig_name != "nan" else (name if name else "未知")
+            # 優先使用 CSV 內的名稱，若無則使用自動抓取的
+            final_name = orig_name if orig_name and orig_name != "nan" else (name if name else "")
             
             processed_rows.append({
                 "代碼": fixed_sid,
@@ -76,10 +80,13 @@ if uploaded_file:
             })
         
         new_df = pd.DataFrame(processed_rows)
-        if not new_df.equals(st.session_state.df):
-            st.session_state.df = new_df
-            st.session_state.calc_results = None
-            st.rerun()
+        # 強制轉型
+        new_df['代碼'] = new_df['代碼'].astype(str)
+        new_df['股票名稱'] = new_df['股票名稱'].astype(str)
+        
+        st.session_state.df = new_df
+        st.session_state.calc_results = None
+        st.rerun()
             
     except Exception as e:
         st.sidebar.error(f"匯入失敗：{e}")
@@ -89,9 +96,9 @@ if st.sidebar.button("🗑️ 清除所有資料"):
     st.session_state.calc_results = None
     st.rerun()
 
-# --- 5. 編輯介面 (含自動補名邏輯) ---
+# --- 5. 編輯介面 (修復後的自動觸發邏輯) ---
 st.subheader("📝 庫存清單編輯")
-st.info("💡 小撇步：直接輸入代碼 (如 2330)，按下 Enter，中文名稱會自動帶出！")
+st.info("💡 輸入代碼 (如 0050) 後，按下 Enter，系統將自動填入名稱。")
 
 # 顯示編輯器
 edited_df = st.data_editor(
@@ -101,52 +108,54 @@ edited_df = st.data_editor(
     key="portfolio_editor"
 )
 
-# 【關鍵功能 1】自動帶出中文名稱邏輯
-# 檢查編輯後的資料是否跟原本不一樣 (代表使用者有打字)
-if not edited_df.equals(st.session_state.df):
-    has_changes = False
-    # 逐行檢查，如果有代碼但沒有名稱，就去抓
-    for index, row in edited_df.iterrows():
-        sid = str(row['代碼']).strip()
-        current_name = str(row['股票名稱']).strip()
-        
-        # 如果有輸入代碼，但名稱是空的、None、或是預設的 nan
-        if sid and (not current_name or current_name == "nan" or current_name == "None"):
-            _, fetched_name, fixed_sid = get_stock_base_info(sid)
-            if fetched_name:
-                edited_df.at[index, '股票名稱'] = fetched_name
-                edited_df.at[index, '代碼'] = fixed_sid # 順便補零
-                has_changes = True
+# 【核心修復】不依賴 equals，直接檢查每一行
+# 只要發現有代碼但沒有名字，就觸發更新
+need_rerun = False
+temp_df = edited_df.copy()
+
+# 確保欄位存在
+if "股票名稱" not in temp_df.columns:
+    temp_df["股票名稱"] = ""
+
+for index, row in temp_df.iterrows():
+    sid = str(row.get('代碼', '')).strip()
+    current_name = str(row.get('股票名稱', '')).strip()
     
-    # 如果真的有幫使用者補資料，才更新並重刷頁面
-    if has_changes:
-        st.session_state.df = edited_df
-        st.rerun()
-    else:
-        # 如果只是改了價格或日期，單純存起來就好，不用一直重刷干擾輸入
+    # 判定條件：有代碼 + (沒名字 或 名字是nan/None)
+    if sid and (not current_name or current_name == "nan" or current_name == "None"):
+        _, fetched_name, fixed_sid = get_stock_base_info(sid)
+        if fetched_name:
+            temp_df.at[index, '股票名稱'] = fetched_name
+            temp_df.at[index, '代碼'] = fixed_sid # 自動補零
+            need_rerun = True
+
+if need_rerun:
+    st.session_state.df = temp_df
+    st.rerun()
+else:
+    # 如果沒有補名需求，但使用者改了價格或日期，也要同步回 session_state
+    # 這樣切換頁面資料才不會丟失
+    if not edited_df.equals(st.session_state.df):
         st.session_state.df = edited_df
 
-# 【關鍵功能 2】匯出 CSV 按鈕 (補回來了！)
+# 匯出 CSV
 csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
-st.download_button(
-    label="📥 匯出目前清單 (CSV)",
-    data=csv_data,
-    file_name="my_portfolio.csv",
-    mime="text/csv",
-)
+st.download_button("📥 匯出目前清單 (CSV)", data=csv_data, file_name="my_portfolio.csv", mime="text/csv")
 
 # --- 6. 執行分析 ---
 if st.button("🚀 執行完整分析"):
-    temp_df = edited_df.copy()
+    process_df = edited_df.copy()
     results, t_inv, t_val, t_div = [], 0, 0, 0
     
     unique_ids = [str(sid).strip().zfill(4) if str(sid).strip().isdigit() else str(sid).strip() 
-                  for sid in temp_df['代碼'].unique() if sid and str(sid) != "None"]
+                  for sid in process_df['代碼'].unique() if sid and str(sid) != "None"]
 
     with st.spinner('正在同步市場數據...'):
         for sid in unique_ids:
             full_id, s_name, fixed_sid = get_stock_base_info(sid)
-            stock_group = temp_df[temp_df['代碼'].astype(str).str.strip().apply(lambda x: x.zfill(4) if x.isdigit() else x) == fixed_sid]
+            # 篩選
+            mask = process_df['代碼'].astype(str).str.strip().apply(lambda x: x.zfill(4) if x.isdigit() else x) == fixed_sid
+            stock_group = process_df[mask]
             
             if full_id:
                 ticker = yf.Ticker(full_id)
@@ -183,7 +192,7 @@ if st.button("🚀 執行完整分析"):
         st.session_state.calc_results = {
             "res_df": pd.DataFrame(results), 
             "summary": (t_inv, t_val, t_div), 
-            "raw_records": temp_df 
+            "raw_records": process_df 
         }
 
 # --- 7. 結果顯示 ---

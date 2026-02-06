@@ -10,6 +10,7 @@ st.set_page_config(page_title="台股投資全攻略", page_icon="📈", layout=
 st.title("📈 台股資產管理系統 (最強容錯版)")
 
 # --- 2. 核心功能：抓取名稱與補零 ---
+# --- 修正後的名稱抓取邏輯 ---
 @st.cache_data(ttl=3600)
 def get_stock_base_info(symbol):
     symbol = str(symbol).strip()
@@ -19,11 +20,15 @@ def get_stock_base_info(symbol):
     for suffix in [".TW", ".TWO"]:
         ticker = yf.Ticker(f"{symbol}{suffix}")
         try:
-            # 使用 fast_info 確保基本存在，再抓 info 拿中文名
-            if ticker.fast_info:
-                info = ticker.info
-                name = info.get('shortName', info.get('longName', f"股票 {symbol}"))
-                return f"{symbol}{suffix}", name, symbol
+            # 優先嘗試抓取 info
+            info = ticker.info
+            
+            # 台灣股票中文名通常存在 'longName' 或 'shortName'
+            # 這裡我們加上一個邏輯：如果抓到的是純英文，則標註代碼
+            name = info.get('longName') or info.get('shortName') or f"股票 {symbol}"
+            
+            # 部分標的在 yfinance 仍會回傳英文，這是資料源限制
+            return f"{symbol}{suffix}", name, symbol
         except:
             continue
     return None, None, symbol

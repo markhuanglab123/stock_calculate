@@ -6,19 +6,23 @@ import plotly.graph_objects as go
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="台股投資全攻略", page_icon="📈", layout="wide")
-st.title("📈 台股資產管理系統 (匯入穩定修正版)")
+st.title("📈 台股資產管理系統 (完整功能版)")
 
-# --- 2. 名稱對照表與補零邏輯 ---
+# --- 2. 核心功能：名稱對照、補零 ---
 @st.cache_data(ttl=3600)
 def get_stock_base_info(symbol):
-    symbol = str(symbol).strip().zfill(4) if str(symbol).strip().isdigit() and len(str(symbol).strip()) < 4 else str(symbol).strip()
+    # 強制轉字串並補零
+    symbol = str(symbol).strip()
+    if symbol.isdigit() and len(symbol) < 4:
+        symbol = symbol.zfill(4)
     
-    # 手動維護常見中文名稱
+    # 手動維護常見中文名稱 (解決 yfinance 只有英文的問題)
     common_names = {
         "2330": "台積電", "0050": "元大台灣50", "0052": "富邦科技",
         "0056": "元大高股息", "2317": "鴻海", "2454": "聯發科",
         "2303": "聯電", "2340": "台亞", "2408": "南亞科",
-        "2881": "富邦金", "2882": "國泰金", "00878": "國泰永續高股息"
+        "2881": "富邦金", "2882": "國泰金", "00878": "國泰永續高股息",
+        "2603": "長榮", "2609": "陽明", "2615": "萬海", "3231": "緯創"
     }
     
     if symbol in common_names:
@@ -27,9 +31,11 @@ def get_stock_base_info(symbol):
     for suffix in [".TW", ".TWO"]:
         ticker = yf.Ticker(f"{symbol}{suffix}")
         try:
-            info = ticker.info
-            name = info.get('longName') or info.get('shortName') or f"股票 {symbol}"
-            return f"{symbol}{suffix}", name, symbol
+            # 嘗試抓取
+            if ticker.fast_info:
+                info = ticker.info
+                name = info.get('longName') or info.get('shortName') or f"股票 {symbol}"
+                return f"{symbol}{suffix}", name, symbol
         except:
             continue
     return None, None, symbol
@@ -40,13 +46,12 @@ if 'df' not in st.session_state:
         {"代碼": "2330", "股票名稱": "台積電", "買進日期": datetime(2023, 1, 1).date(), "買進單價": 500.0, "持有股數": 1000},
     ])
 
-# --- 4. 側邊欄：檔案匯入與重置 ---
+# --- 4. 側邊欄：檔案管理 ---
 st.sidebar.header("📁 檔案管理")
 uploaded_file = st.sidebar.file_uploader("匯入庫存 CSV", type=["csv"])
 
 if uploaded_file:
     try:
-        # 讀取並清洗欄位
         raw_df = pd.read_csv(uploaded_file)
         raw_df.columns = [c.strip() for c in raw_df.columns]
         
@@ -62,12 +67,13 @@ if uploaded_file:
                 "持有股數": int(row['持有股數'])
             })
         
-        # 更新至 session_state
         new_df = pd.DataFrame(processed_rows)
-        # 這裡用一個簡單的比較來避免無限 rerun
+        # 避免重複刷新
         if not new_df.equals(st.session_state.df):
             st.session_state.df = new_df
-            st.rerun() # 強制刷新網頁以反映匯入結果
+            st.session_state.calc_results = None # 清除舊結果
+            st.rerun()
+            
     except Exception as e:
         st.sidebar.error(f"匯入失敗：{e}")
 
@@ -78,26 +84,27 @@ if st.sidebar.button("🗑️ 清除所有資料"):
 
 # --- 5. 編輯介面 ---
 st.subheader("📝 庫存清單編輯")
-# 關鍵：給予固定 key，確保 session_state.df 改變時編輯器會同步
 edited_df = st.data_editor(
     st.session_state.df, 
     num_rows="dynamic", 
     use_container_width=True,
-    key="portfolio_editor" 
+    key="portfolio_editor"
 )
 
-# --- 6. 分析與計算 ---
+# --- 6. 執行分析 ---
 if st.button("🚀 執行完整分析"):
     temp_df = edited_df.copy()
     results, t_inv, t_val, t_div = [], 0, 0, 0
     
+    # 抓取所有不重複代碼 (需補零)
     unique_ids = [str(sid).strip().zfill(4) if str(sid).strip().isdigit() else str(sid).strip() 
                   for sid in temp_df['代碼'].unique() if sid and str(sid) != "None"]
 
-    with st.spinner('正在分析標的...'):
+    with st.spinner('正在同步市場數據...'):
         for sid in unique_ids:
             full_id, s_name, fixed_sid = get_stock_base_info(sid)
-            stock_group = temp_df[temp_df['代碼'].astype(str).str.zfill(4) == fixed_sid]
+            # 篩選出該代碼的所有交易紀錄
+            stock_group = temp_df[temp_df['代碼'].astype(str).str.strip().apply(lambda x: x.zfill(4) if x.isdigit() else x) == fixed_sid]
             
             if full_id:
                 ticker = yf.Ticker(full_id)
@@ -110,12 +117,14 @@ if st.button("🚀 執行完整分析"):
                     buy_dt = pd.to_datetime(row['買進日期']).tz_localize('UTC')
                     actions = ticker.actions
                     row_sh, row_div = row['持有股數'], 0
+                    
                     if not actions.empty:
                         actions.index = actions.index.tz_convert('UTC') if actions.index.tz else actions.index.tz_localize('UTC')
                         my_act = actions.loc[buy_dt:]
                         row_div = (my_act['Dividends'] * row['持有股數']).sum()
                         for split in my_act['Stock Splits']:
                             if split > 0: row_sh *= split
+                            
                     sub_cost += (row['買進單價'] * row['持有股數']) * 1.00085
                     sub_sh += row_sh
                     sub_div += row_div
@@ -132,10 +141,10 @@ if st.button("🚀 執行完整分析"):
         st.session_state.calc_results = {
             "res_df": pd.DataFrame(results), 
             "summary": (t_inv, t_val, t_div), 
-            "raw_records": temp_df
+            "raw_records": temp_df # 存下來給線圖用
         }
 
-# --- 7. 顯示報告與線圖 ---
+# --- 7. 結果顯示與線圖區 ---
 if 'calc_results' in st.session_state and st.session_state.calc_results:
     res = st.session_state.calc_results
     st.divider()
@@ -144,20 +153,74 @@ if 'calc_results' in st.session_state and st.session_state.calc_results:
     c2.metric("目前市值", f"{int(res['summary'][1]):,}")
     c3.metric("總領息", f"{int(res['summary'][2]):,}")
     net = (res['summary'][1] + res['summary'][2]) - res['summary'][0]
-    st.metric("總淨損益", f"{int(net):,}", f"{(net/res['summary'][0]*100):.2f}%")
+    st.metric("總淨損益", f"{int(net):,}", f"{(net/res['summary'][0]*100):.2f}%", delta_color="inverse" if net >= 0 else "normal")
 
     st.write("### 📊 庫存匯總報告")
     st.dataframe(res['res_df'], use_container_width=True)
 
+    # --- 8. 修正回來的：個股深度分析 (含時間切換) ---
     st.write("---")
     st.subheader("📈 個別標的深度分析")
+    
+    # 下拉選單
     opt = [f"{r['代碼']} - {r['名稱']}" for _, r in res['res_df'].iterrows()]
     sel = st.selectbox("選擇股票：", opt)
     sel_sid = sel.split(" - ")[0]
     
-    # 畫圖邏輯
-    h_data = yf.Ticker(f"{sel_sid}.TW").history(period="1y")
+    # 這裡就是你要的「選擇時間範圍」功能！
+    p_map = {"一日": "1d", "一週": "5d", "一月": "1mo", "一年": "1y", "五年": "5y"}
+    sel_p = st.radio("選擇時間範圍：", list(p_map.keys()), horizontal=True, index=3) # 預設一年
+
+    # 準備繪圖數據
+    raw_records = res['raw_records']
+    # 確保格式一致 (轉字串、去空白、補零)
+    raw_records['代碼_清標'] = raw_records['代碼'].astype(str).str.strip().apply(lambda x: x.zfill(4) if x.isdigit() else x)
+    my_buys = raw_records[raw_records['代碼_清標'] == sel_sid]
+    
+    avg_price = res['res_df'][res['res_df']['代碼'] == sel_sid].iloc[0]['平均成本']
+    
+    # 抓取歷史股價
+    t_obj = yf.Ticker(f"{sel_sid}.TW" if not "." in str(sel_sid) else sel_sid)
+    h_data = t_obj.history(period=p_map[sel_p])
+    
     if not h_data.empty:
         fig = go.Figure()
+        
+        # 1. 股價線
         fig.add_trace(go.Scatter(x=h_data.index, y=h_data['Close'], mode='lines', name='股價'))
+        
+        # 2. 平均成本線 (橘色虛線)
+        fig.add_hline(y=avg_price, line_dash="dash", line_color="orange", annotation_text=f"平均成本:{avg_price}")
+        
+        # 3. 買入點標記 (紅色垂直線)
+        h_min, h_max = h_data.index.min().date(), h_data.index.max().date()
+        
+        for _, buy_row in my_buys.iterrows():
+            b_date = buy_row['買進日期']
+            # 只有當買入日期在目前選擇的時間範圍內才顯示
+            if h_min <= b_date <= h_max:
+                b_dt_ts = pd.to_datetime(b_date)
+                
+                # 畫垂直紅線
+                fig.add_trace(go.Scatter(
+                    x=[b_dt_ts, b_dt_ts], 
+                    y=[h_data['Close'].min(), h_data['Close'].max()],
+                    mode="lines", 
+                    line=dict(color="red", width=1, dash="dot"), 
+                    showlegend=False
+                ))
+                
+                # 標註買入價格
+                fig.add_annotation(
+                    x=b_dt_ts, 
+                    y=buy_row['買進單價'], 
+                    text=f"買點:{buy_row['買進單價']}", 
+                    showarrow=True, 
+                    arrowhead=2, 
+                    arrowcolor="red"
+                )
+        
+        fig.update_layout(title=f"{sel} - {sel_p} 走勢圖", height=500)
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("無法取得此時間區間的股價資料。")

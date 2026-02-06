@@ -7,25 +7,23 @@ import plotly.graph_objects as go
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="台股投資全攻略", page_icon="📈", layout="wide")
-st.title("📈 台股資產管理系統 (即時名稱對應版)")
+st.title("📈 台股資產管理系統 (最強容錯版)")
 
 # --- 2. 核心功能：抓取名稱與補零 ---
 @st.cache_data(ttl=3600)
 def get_stock_base_info(symbol):
     symbol = str(symbol).strip()
-    # 自動補零邏輯
     if symbol.isdigit() and len(symbol) < 4:
         symbol = symbol.zfill(4)
         
     for suffix in [".TW", ".TWO"]:
         ticker = yf.Ticker(f"{symbol}{suffix}")
         try:
-            # 抓取極少量資料來確認存在並獲取名稱
-            info = ticker.fast_info
-            # yfinance 的 info 抓取中文有時較慢，這裡嘗試抓取短名稱
-            full_info = ticker.info
-            name = full_info.get('shortName', full_info.get('longName', f"股票 {symbol}"))
-            return f"{symbol}{suffix}", name, symbol
+            # 使用 fast_info 確保基本存在，再抓 info 拿中文名
+            if ticker.fast_info:
+                info = ticker.info
+                name = info.get('shortName', info.get('longName', f"股票 {symbol}"))
+                return f"{symbol}{suffix}", name, symbol
         except:
             continue
     return None, None, symbol
@@ -39,18 +37,26 @@ if 'df' not in st.session_state:
 if 'calc_results' not in st.session_state:
     st.session_state.calc_results = None
 
-# --- 4. 側邊欄檔案管理 (含即時補名邏輯) ---
+# --- 4. 側邊欄檔案管理 (強化容錯) ---
 st.sidebar.header("📁 檔案管理")
 uploaded_file = st.sidebar.file_uploader("匯入庫存 CSV", type=["csv"])
 
 if uploaded_file:
     try:
         df_new = pd.read_csv(uploaded_file)
-        # 處理代碼與名稱
+        # 清洗欄位：去除空白並強制轉換
+        df_new.columns = [c.strip() for c in df_new.columns]
+        
+        # 如果少了「股票名稱」欄位，自動補齊
+        if "股票名稱" not in df_new.columns:
+            df_new["股票名稱"] = "待讀取"
+            
+        # 處理每一列資料
         processed_rows = []
         for _, row in df_new.iterrows():
-            sid = str(row['代碼']).strip()
+            sid = str(row['代碼']).strip().split('.')[0] # 去除 .TW 等後綴
             _, name, fixed_sid = get_stock_base_info(sid)
+            
             processed_rows.append({
                 "代碼": fixed_sid,
                 "股票名稱": name if name else "未知",
@@ -58,36 +64,39 @@ if uploaded_file:
                 "買進單價": float(row['買進單價']),
                 "持有股數": int(row['持有股數'])
             })
-        st.session_state.df = pd.DataFrame(processed_rows)
-        st.session_state.calc_results = None
-        st.rerun()
+        
+        new_df = pd.DataFrame(processed_rows)
+        # 檢查是否真的有變動才觸發 rerun
+        if not new_df.equals(st.session_state.df):
+            st.session_state.df = new_df
+            st.session_state.calc_results = None
+            st.rerun()
+            
     except Exception as e:
-        st.sidebar.error(f"匯入失敗: {e}")
+        st.sidebar.error(f"匯入失敗！請檢查 CSV 欄位。錯誤：{e}")
 
-# --- 5. 編輯介面 (自動更新名稱邏輯) ---
+# --- 5. 編輯介面 ---
 st.subheader("📝 庫存清單編輯")
-st.info("💡 提示：輸入代碼後按下 Enter 或點擊外部，系統會自動在分析時關聯名稱。")
-
-# 這裡讓使用者編輯，並在分析時補齊缺少的名稱
 edited_df = st.data_editor(st.session_state.df, num_rows="dynamic", use_container_width=True)
 
-csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
-st.download_button("📥 下載目前庫存 CSV", data=csv_data, file_name="my_portfolio.csv", mime="text/csv")
+# 下載範例 (幫助使用者對齊格式)
+sample_csv = edited_df.to_csv(index=False).encode('utf-8-sig')
+st.download_button("📥 下載目前資料 CSV", data=sample_csv, file_name="my_portfolio.csv", mime="text/csv")
 
 # --- 6. 計算按鈕 ---
 if st.button("🚀 執行完整分析"):
-    temp_df = edited_df.copy()
+    process_df = edited_df.copy()
     results = []
     t_inv, t_val, t_div = 0, 0, 0
     
-    # 建立一個進度條
-    unique_ids = [str(sid).strip() for sid in temp_df['代碼'].unique() if sid and str(sid) != "None"]
-    
-    with st.spinner(f'正在分析 {len(unique_ids)} 支標的並同步名稱...'):
-        for sid in unique_ids:
-            # 統一補零
+    # 過濾有效代碼
+    ids_to_process = [str(sid).strip() for sid in process_df['代碼'].unique() if sid and str(sid) != "None"]
+
+    with st.spinner(f'正在分析 {len(ids_to_process)} 支標的...'):
+        for sid in ids_to_process:
             full_id, s_name, fixed_sid = get_stock_base_info(sid)
-            stock_group = temp_df[temp_df['代碼'].astype(str).str.strip().str.zfill(4) == fixed_sid]
+            # 聚合相同代碼的股票
+            stock_group = process_df[process_df['代碼'].astype(str).str.strip().str.zfill(4) == fixed_sid]
             
             if full_id:
                 ticker = yf.Ticker(full_id)
@@ -95,11 +104,12 @@ if st.button("🚀 執行完整分析"):
                 if hist.empty: continue
                 cur_p = hist['Close'].iloc[-1]
                 
-                sub_sh, sub_cost, sub_div = 0, 0, 0
+                total_sh, total_cost, total_div = 0, 0, 0
                 for _, row in stock_group.iterrows():
                     buy_dt = pd.to_datetime(row['買進日期']).tz_localize('UTC')
                     actions = ticker.actions
-                    row_div, row_sh = 0, row['持有股數']
+                    row_sh = row['持有股數']
+                    row_div = 0
                     
                     if not actions.empty:
                         actions.index = actions.index.tz_convert('UTC') if actions.index.tz else actions.index.tz_localize('UTC')
@@ -108,36 +118,30 @@ if st.button("🚀 執行完整分析"):
                         for split in my_act['Stock Splits']:
                             if split > 0: row_sh *= split
                     
-                    sub_cost += (row['買進單價'] * row['持有股數']) * 1.00085
-                    sub_sh += row_sh
-                    sub_div += row_div
+                    total_cost += (row['買進單價'] * row['持有股數']) * 1.00085
+                    total_sh += row_sh
+                    total_div += row_div
                 
-                cur_v = cur_p * sub_sh
+                cur_v = cur_p * total_sh
                 results.append({
-                    "名稱": s_name, 
-                    "代碼": fixed_sid, 
-                    "目前股價": round(cur_p, 2), 
-                    "持有股數": int(sub_sh),
-                    "累積股息": int(sub_div), 
-                    "總損益": int((cur_v+sub_div)-sub_cost), 
-                    "報酬率%": round(((cur_v+sub_div)-sub_cost)/sub_cost*100, 2) if sub_cost > 0 else 0,
-                    "市值": int(cur_v), 
-                    "平均成本": round(sub_cost/sub_sh, 2)
+                    "名稱": s_name, "代碼": fixed_sid, "目前股價": round(cur_p, 2), "持有股數": int(total_sh),
+                    "累積股息": int(total_div), "總損益": int((cur_v+total_div)-total_cost), 
+                    "報酬率%": round(((cur_v+total_div)-total_cost)/total_cost*100, 2) if total_cost > 0 else 0,
+                    "市值": int(cur_v), "平均成本": round(total_cost/total_sh, 2)
                 })
-                t_inv, t_val, t_div = t_inv + sub_cost, t_val + cur_v, t_div + sub_div
+                t_inv, t_val, t_div = t_inv + total_cost, t_val + cur_v, t_div + total_div
 
         st.session_state.calc_results = {
             "res_df": pd.DataFrame(results),
             "summary": (t_inv, t_val, t_div),
-            "raw_records": temp_df
+            "raw_records": process_df
         }
-        # 更新原始表格中的名稱顯示
-        st.rerun()
 
 # --- 7. 顯示結果與穩定線圖 ---
 if st.session_state.calc_results:
     data = st.session_state.calc_results
     res_df = data["res_df"]
+    raw_records = data["raw_records"]
     t_inv, t_val, t_div = data["summary"]
 
     st.divider()
@@ -152,19 +156,16 @@ if st.session_state.calc_results:
     st.write("### 📊 庫存匯總報告")
     st.dataframe(res_df, use_container_width=True)
 
-    # --- 8. 個別標的分析 (穩定顯示) ---
+    # --- 8. 多點標註走勢圖 ---
     st.write("---")
     st.subheader("📈 個別標的深度分析")
-    
     option_list = [f"{row['代碼']} - {row['名稱']}" for _, row in res_df.iterrows()]
     selected_option = st.selectbox("選擇股票：", option_list)
     sel_sid = selected_option.split(" - ")[0]
     
-    # 從原始紀錄中抓取該代碼的所有買點
-    my_buys = data["raw_records"].copy()
-    my_buys['代碼'] = my_buys['代碼'].apply(lambda x: str(x).strip().zfill(4) if str(x).strip().isdigit() else str(x).strip())
-    this_stock_buys = my_buys[my_buys['代碼'] == sel_sid]
-    
+    # 確保比對時代碼格式一致
+    raw_records['代碼_清標'] = raw_records['代碼'].astype(str).str.strip().str.zfill(4)
+    this_stock_buys = raw_records[raw_records['代碼_清標'] == sel_sid]
     avg_price = res_df[res_df['代碼'] == sel_sid].iloc[0]['平均成本']
     
     p_map = {"一日": "1d", "一週": "5d", "一月": "1mo", "一年": "1y", "五年": "5y"}
@@ -189,5 +190,4 @@ if st.session_state.calc_results:
                 ))
                 fig.add_annotation(x=b_dt_ts, y=buy_row['買進單價'], text=f"買點:{buy_row['買進單價']}", showarrow=True, arrowhead=2, arrowcolor="red")
         
-        fig.update_layout(height=500)
         st.plotly_chart(fig, use_container_width=True)

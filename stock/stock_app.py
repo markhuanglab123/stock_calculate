@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="台股投資全攻略", page_icon="📈", layout="wide")
-st.title("📈 台股資產管理系統 (強制同步版)")
+st.title("📈 台股資產管理系統 (數據同步強化版)")
 
 # --- 2. 快取功能 ---
 @st.cache_data(ttl=3600)
@@ -34,42 +34,47 @@ if 'df' not in st.session_state:
 if 'calc_results' not in st.session_state:
     st.session_state.calc_results = None
 
-# --- 4. 側邊欄檔案管理 (修正同步邏輯) ---
+# --- 4. 側邊欄檔案管理 (強制更新邏輯) ---
 st.sidebar.header("📁 檔案管理")
 uploaded_file = st.sidebar.file_uploader("匯入庫存 CSV", type=["csv"])
 
 if uploaded_file:
-    # 讀取 CSV
     df_new = pd.read_csv(uploaded_file)
+    # 強制格式清洗
     df_new['代碼'] = df_new['代碼'].astype(str).str.strip()
     df_new['買進日期'] = pd.to_datetime(df_new['買進日期']).dt.date
-    
-    # 檢查是否與現有的不同，若是則更新並重整
+    # 比較內容，若不同則強制寫入並重新執行
     if not df_new.equals(st.session_state.df):
         st.session_state.df = df_new
-        st.session_state.calc_results = None # 清除舊的計算結果，強迫使用者按分析
-        st.rerun() # 強制網頁重新跑一次，讓編輯器顯示新資料
+        st.session_state.calc_results = None # 重置舊結果
+        st.rerun()
 
 # --- 5. 編輯與下載 ---
 st.subheader("📝 庫存清單編輯")
-# 這裡不指定 key，讓它隨 session_state.df 變動
-edited_df = st.data_editor(st.session_state.df, num_rows="dynamic", use_container_width=True)
+# 這裡加一個 key 讓 Streamlit 追蹤編輯器的狀態
+edited_df = st.data_editor(st.session_state.df, num_rows="dynamic", use_container_width=True, key="my_editor")
 
+# 下載按鈕
 csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
 st.download_button("📥 下載目前庫存 CSV", data=csv_data, file_name="my_portfolio.csv", mime="text/csv")
 
-# --- 6. 計算按鈕 ---
+# --- 6. 計算按鈕 (核心修正區) ---
 if st.button("🚀 執行完整分析"):
-    # 這裡是關鍵：直接使用編輯器此刻輸出的資料
+    # 【關鍵】直接抓取 session_state 或編輯器當下的最新 Snapshot
+    # 為了保險，我們直接使用編輯器的輸出資料
     process_df = edited_df.copy()
     process_df['代碼'] = process_df['代碼'].astype(str).str.strip()
     
+    # 排除空行
+    process_df = process_df[process_df['代碼'] != "None"]
+    process_df = process_df[process_df['代碼'] != ""]
+
     results = []
     t_inv, t_val, t_div = 0, 0, 0
-    unique_ids = [sid for sid in process_df['代碼'].unique() if sid and sid != "None"]
+    unique_ids = process_df['代碼'].unique()
 
-    if not unique_ids:
-        st.error("表格中沒有有效的股票代碼！")
+    if len(unique_ids) == 0:
+        st.warning("請先輸入或匯入股票代碼！")
     else:
         with st.spinner(f'正在分析 {len(unique_ids)} 支股票...'):
             for sid in unique_ids:
@@ -82,7 +87,7 @@ if st.button("🚀 執行完整分析"):
                     if hist.empty: continue
                     cur_p = hist['Close'].iloc[-1]
                     
-                    total_sh, total_cost, total_div = 0, 0, 0
+                    sub_sh, sub_cost, sub_div = 0, 0, 0
                     for _, row in stock_group.iterrows():
                         buy_dt = pd.to_datetime(row['買進日期']).tz_localize('UTC')
                         actions = ticker.actions
@@ -95,28 +100,29 @@ if st.button("🚀 執行完整分析"):
                             for split in my_act['Stock Splits']:
                                 if split > 0: row_sh *= split
                         
-                        total_cost += (row['買進單價'] * row['持有股數']) * 1.00085
-                        total_sh += row_sh
-                        total_div += row_div
+                        sub_cost += (row['買進單價'] * row['持有股數']) * 1.00085
+                        sub_sh += row_sh
+                        sub_div += row_div
                     
-                    cur_v = cur_p * total_sh
+                    cur_v = cur_p * sub_sh
                     results.append({
-                        "名稱": s_name, "代碼": sid, "目前股價": round(cur_p, 2), "持有股數": int(total_sh),
-                        "累積股息": int(total_div), "總損益": int((cur_v+total_div)-total_cost), 
-                        "報酬率%": round(((cur_v+total_div)-total_cost)/total_cost*100, 2), 
-                        "市值": int(cur_v), "平均成本": round(total_cost/total_sh, 2)
+                        "名稱": s_name, "代碼": sid, "目前股價": round(cur_p, 2), "持有股數": int(sub_sh),
+                        "累積股息": int(sub_div), "總損益": int((cur_v+sub_div)-sub_cost), 
+                        "報酬率%": round(((cur_v+sub_div)-sub_cost)/sub_cost*100, 2), 
+                        "市值": int(cur_v), "平均成本": round(sub_cost/sub_sh, 2)
                     })
-                    t_inv += total_cost
+                    t_inv += sub_cost
                     t_val += cur_v
-                    t_div += total_div
+                    t_div += sub_div
 
+            # 存入結果
             st.session_state.calc_results = {
                 "res_df": pd.DataFrame(results),
                 "summary": (t_inv, t_val, t_div),
                 "raw_records": process_df
             }
 
-# --- 7. 顯示結果 ---
+# --- 7. 顯示結果 (移出按鈕外，確保持續顯示) ---
 if st.session_state.calc_results:
     data = st.session_state.calc_results
     res_df = data["res_df"]
@@ -125,28 +131,29 @@ if st.session_state.calc_results:
 
     st.divider()
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("帳戶總投入", f"{int(t_inv):,}")
-    c2.metric("目前總市值", f"{int(t_val):,}")
+    c1.metric("總投入", f"{int(t_inv):,}")
+    c2.metric("總市值", f"{int(t_val):,}")
     c3.metric("總領息", f"{int(t_div):,}")
     net_p = (t_val + t_div) - t_inv
     net_r = (net_p / t_inv) * 100 if t_inv > 0 else 0
-    st.metric("總損益", f"{int(net_p):,}", f"{net_r:.2f}%", delta_color="inverse" if net_p >= 0 else "normal")
+    st.metric("總淨損益", f"{int(net_p):,}", f"{net_r:.2f}%", delta_color="inverse" if net_p >= 0 else "normal")
 
-    st.write("### 📊 庫存彙總表")
+    st.write("### 📊 庫存汇总報告")
     st.dataframe(res_df, use_container_width=True)
 
     # --- 8. 多點標註走勢圖 ---
     st.write("---")
-    st.subheader("📈 個別標的分析")
+    st.subheader("📈 個別標的深度分析")
+    
     option_list = [f"{row['代碼']} - {row['名稱']}" for _, row in res_df.iterrows()]
     selected_option = st.selectbox("選擇股票：", option_list)
     sel_sid = selected_option.split(" - ")[0]
     
     my_buys = raw_records[raw_records['代碼'] == sel_sid]
     avg_price = res_df[res_df['代碼'] == sel_sid].iloc[0]['平均成本']
-    
+
     p_map = {"一日": "1d", "一週": "5d", "一月": "1mo", "一年": "1y", "五年": "5y"}
-    sel_p = st.radio("範圍：", list(p_map.keys()), horizontal=True, index=3)
+    sel_p = st.radio("週期：", list(p_map.keys()), horizontal=True, index=3)
     
     t_obj = yf.Ticker(f"{sel_sid}.TW" if not "." in str(sel_sid) else sel_sid)
     h_data = t_obj.history(period=p_map[sel_p])
